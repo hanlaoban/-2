@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Liquid Hand Distortion</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Courier New', monospace; }
+        
+        #container { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+        
+        /* 1. 隐藏的摄像头源 */
+        #video-feed { display: none; }
+        
+        /* 2. 骨骼可视化层 (UI层) */
+        #skeleton-canvas { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            z-index: 5; pointer-events: none; transform: scaleX(-1); mix-blend-mode: screen;
+        }
+
+        /* 3. Three.js 渲染层 (液态主视觉) */
+        #three-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+
+        /* UI HUD */
+        #ui-layer { 
+            position: absolute; top: 20px; left: 20px; color: white; z-index: 10; pointer-events: none;
+            text-shadow: 0 0 5px rgba(255, 0, 85, 0.8);
+        }
+        .title { 
+            font-size: 24px; font-weight: 900; letter-spacing: 2px;
+            background: linear-gradient(90deg, #ff0055, #00ffff);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            margin-bottom: 5px;
+        }
+        .hud-text { font-size: 12px; color: #aaa; line-height: 1.5; }
+
+        #loading { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            color: #fff; font-size: 14px; z-index: 20; letter-spacing: 2px;
+        }
+
+        /* 强制不可折叠 GUI */
+        #gui-container { position: absolute; top: 20px; right: 20px; z-index: 100; }
+        .lil-gui .title { pointer-events: none; cursor: default; background: #111; border-left: 2px solid #ff0055;}
+        .lil-gui .close-button { display: none; }
+        .lil-gui { --width: 280px; --background-color: rgba(0, 0, 0, 0.85); --text-color: #eee; --widget-color: #333; --focus-color: #ff0055; --number-color: #00ffff; }
+    </style>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19.1/dist/lil-gui.umd.min.js"></script>
+</head>
+<body>
+
+    <div id="container">
+        <video id="video-feed" playsinline></video>
+        <canvas id="skeleton-canvas"></canvas>
+        <div id="three-canvas"></div>
+    </div>
+
+    <div id="ui-layer">
+        <div class="title">LIQUID_GLITCH // V.01</div>
+        <div class="hud-text">
+            > SYSTEM: ONLINE<br>
+            > SHADER: RGB_SHIFT_DISTORTION<br>
+            > HAND_TRACKING: <span id="status" style="color:#ff0055">SEARCHING...</span>
+        </div>
+    </div>
+
+    <div id="loading">INITIALIZING NEURAL INTERFACE...</div>
+    <div id="gui-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Config ---
+        const CONFIG = {
+            distortionStrength: 0.5,  // 扭曲力度
+            radius: 0.4,              // 影响范围
+            rgbShiftIntensity: 1.5,   // 色散强度
+            viscosity: 0.1,           // 液体粘度（平滑度）
+            zoom: 1.0,
+            debugSkeleton: true
+        };
+
+        let scene, camera, renderer, material, plane;
+        let skeletonCtx, skeletonCanvas;
+        
+        // Interaction State
+        // Normalized coordinates (0 to 1)
+        let targetMouse = new THREE.Vector2(0.5, 0.5); 
+        let currentMouse = new THREE.Vector2(0.5, 0.5);
+        let velocity = new THREE.Vector2(0, 0);
+        let isPinching = false;
+        let time = 0;
+
+        // Image URL (High quality Cyberpunk/Abstract image)
+        const IMG_URL = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop';
+
+        async function init() {
+            // 1. Three.js Setup
+            const container = document.getElementById('three-canvas');
+            scene = new THREE.Scene();
+            
+            // 使用正交相机 (Orthographic) 保证 2D 图片无透视变形，充满屏幕
+            const frustumSize = 1;
+            const aspect = window.innerWidth / window.innerHeight;
+            camera = new THREE.OrthographicCamera(frustumSize * aspect / -2, frustumSize * aspect / 2, frustumSize / 2, frustumSize / -2, 0.1, 1000);
+            camera.position.z = 1;
+
+            renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            // 2. Texture & Shader
+            const textureLoader = new THREE.TextureLoader();
+            const texture = await textureLoader.loadAsync(IMG_URL);
+            
+            // Adjust plane size to cover screen while maintaining aspect ratio logic inside shader
+            const geometry = new THREE.PlaneGeometry(2 * aspect, 2); 
+
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0 },
+                    uTexture: { value: texture },
+                    uMouse: { value: new THREE.Vector2(0.5, 0.5) }, // Hand position
+                    uVelo: { value: new THREE.Vector2(0, 0) },      // Hand Velocity for RGB shift
+                    uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                    uImageRes: { value: new THREE.Vector2(texture.image.width, texture.image.height) },
+                    uStrength: { value: CONFIG.distortionStrength },
+                    uRadius: { value: CONFIG.radius },
+                    uAberration: { value: CONFIG.rgbShiftIntensity }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float uTime;
+                    uniform sampler2D uTexture;
+                    uniform vec2 uMouse;
+                    uniform vec2 uVelo;
+                    uniform vec2 uResolution;
+                    uniform vec2 uImageRes;
+                    uniform float uStrength;
+                    uniform float uRadius;
+                    uniform float uAberration;
+
+                    varying vec2 vUv;
+
+                    // Cover fit logic
+                    vec2 getCoverUv(vec2 uv) {
+                        vec2 s = uResolution; // Screen
+                        vec2 i = uImageRes;   // Image
+                        float rs = s.x / s.y;
+                        float ri = i.x / i.y;
+                        vec2 new = rs < ri ? vec2(i.x * s.y / i.y, s.y) : vec2(s.x, i.y * s.x / i.x);
+                        vec2 offset = (rs < ri ? vec2((new.x - s.x) / 2.0, 0.0) : vec2(0.0, (new.y - s.y) / 2.0)) / new;
+                        vec2 uvCover = uv * s / new + offset;
+                        return uvCover;
+                    }
+
+                    void main() {
+                        vec2 uv = getCoverUv(vUv);
+                        
+                        // 1. Calculate Distance field from Hand
+                        // Aspect ratio correction for circular interaction
+                        vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);
+                        vec2 mouseCorrected = uMouse * aspect;
+                        vec2 uvCorrected = vUv * aspect;
+                        
+                        float dist = distance(uvCorrected, mouseCorrected);
+                        
+                        // 2. Liquid Distortion Force (Bulge/Pinch)
+                        // Smoothstep makes a soft circle
+                        float decay = smoothstep(uRadius, 0.0, dist);
+                        
+                        // Distortion direction maps to velocity direction + radial direction
+                        vec2 dir = normalize(uvCorrected - mouseCorrected);
+                        
+                        // Combined distortion: Drag (Velocity) + Bulge (Radial)
+                        vec2 distortion = (dir * 0.2 + uVelo * 2.0) * decay * uStrength;
+
+                        // 3. RGB Shift (Chromatic Aberration) based on Velocity
+                        // The faster the hand, the larger the separation
+                        float shiftStrength = length(uVelo) * uAberration * 5.0 + decay * 0.02;
+                        vec2 rgbOffset = normalize(uVelo) * shiftStrength;
+                        
+                        // Sample channels separately
+                        float r = texture2D(uTexture, uv - distortion - rgbOffset).r;
+                        float g = texture2D(uTexture, uv - distortion).g;
+                        float b = texture2D(uTexture, uv - distortion + rgbOffset).b;
+
+                        // Vignette & Noise
+                        float noise = (fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.05;
+                        
+                        gl_FragColor = vec4(r, g, b, 1.0) + noise;
+                    }
+                `
+            });
+
+            plane = new THREE.Mesh(geometry, material);
+            scene.add(plane);
+
+            // 3. Canvas & MediaPipe
+            skeletonCanvas = document.getElementById('skeleton-canvas');
+            skeletonCtx = skeletonCanvas.getContext('2d');
+            resizeCanvas();
+
+            setupGUI();
+            initMediaPipe();
+
+            document.getElementById('loading').style.display = 'none';
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        // --- MediaPipe Logic ---
+        function initMediaPipe() {
+            const videoElement = document.getElementById('video-feed');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onHandsResults);
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => { await hands.send({image: videoElement}); },
+                width: 640, height: 480 
+            });
+            cameraUtils.start();
+        }
+
+        function onHandsResults(results) {
+            // Draw Skeleton
+            skeletonCtx.clearRect(0, 0, skeletonCanvas.width, skeletonCanvas.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const lm = results.multiHandLandmarks[0];
+                
+                // Visualization
+                if (CONFIG.debugSkeleton) {
+                    drawConnectors(skeletonCtx, lm, HAND_CONNECTIONS, {color: 'rgba(0, 255, 255, 0.5)', lineWidth: 2});
+                    drawLandmarks(skeletonCtx, lm, {color: '#ff0055', lineWidth: 1, radius: 2});
+                }
+                
+                // Logic: Index Finger Tip (8)
+                const indexTip = lm[8];
+                
+                // Update Target Mouse (Flip X)
+                targetMouse.set(1.0 - indexTip.x, indexTip.y);
+                
+                // Detect Pinch (Thumb 4 & Index 8)
+                const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+                isPinching = pinchDist < 0.05;
+
+                document.getElementById('status').innerText = isPinching ? "LOCKED (PINCH)" : "TRACKING";
+                document.getElementById('status').style.color = "#00ffff";
+            } else {
+                document.getElementById('status').innerText = "SEARCHING...";
+                document.getElementById('status').style.color = "#ff0055";
+                // Reset velocity when hand lost, but keep position
+                targetMouse.set(0.5, 0.5);
+            }
+        }
+
+        // --- Core Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.01;
+
+            if (material) {
+                // Physics: Smooth Mouse Movement (Viscosity)
+                // lerp creates the "liquid" delay feel
+                let prevMouse = currentMouse.clone();
+                currentMouse.lerp(targetMouse, CONFIG.viscosity);
+                
+                // Calculate Velocity
+                let vel = new THREE.Vector2().subVectors(currentMouse, prevMouse);
+                // Smooth velocity decay
+                velocity.lerp(vel, 0.1); 
+
+                // Dynamic Strength based on Pinch
+                let targetStrength = isPinching ? CONFIG.distortionStrength * 2.0 : CONFIG.distortionStrength;
+                material.uniforms.uStrength.value = THREE.MathUtils.lerp(material.uniforms.uStrength.value, targetStrength, 0.1);
+
+                // Update Uniforms
+                material.uniforms.uTime.value = time;
+                material.uniforms.uMouse.value = currentMouse;
+                material.uniforms.uVelo.value = velocity;
+                material.uniforms.uAberration.value = CONFIG.rgbShiftIntensity;
+                material.uniforms.uRadius.value = CONFIG.radius;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- GUI ---
+        function setupGUI() {
+            const gui = new lil.GUI({ container: document.getElementById('gui-container'), title: 'FLUID_ENGINE' });
+            
+            const effect = gui.addFolder('DISTORTION MATRIX');
+            effect.add(CONFIG, 'distortionStrength', -1.0, 1.0).name('Liquid Force');
+            effect.add(CONFIG, 'radius', 0.1, 1.0).name('Influence Radius');
+            effect.add(CONFIG, 'viscosity', 0.01, 0.5).name('Flow Viscosity');
+            effect.open();
+
+            const glitch = gui.addFolder('OPTICS / GLITCH');
+            glitch.add(CONFIG, 'rgbShiftIntensity', 0.0, 5.0).name('RGB Aberration');
+            glitch.open();
+
+            const sys = gui.addFolder('SYSTEM');
+            sys.add(CONFIG, 'debugSkeleton').name('Show Skeleton');
+            sys.open();
+        }
+
+        function resizeCanvas() {
+            skeletonCanvas.width = window.innerWidth;
+            skeletonCanvas.height = window.innerHeight;
+        }
+
+        function onWindowResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+            // Update camera frustum to match aspect
+            const frustumSize = 1;
+            camera.left = -frustumSize * aspect / 2;
+            camera.right = frustumSize * aspect / 2;
+            camera.top = frustumSize / 2;
+            camera.bottom = -frustumSize / 2;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            if(material) material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+            
+            // Update plane geometry to fill screen
+            if (plane) {
+                plane.geometry.dispose();
+                plane.geometry = new THREE.PlaneGeometry(2 * aspect, 2);
+            }
+            resizeCanvas();
+        }
+
+        init();
+    </script>
+</body>
+</html>
