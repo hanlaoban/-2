@@ -3,49 +3,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Liquid Hand Distortion</title>
+    <title>Cosmic Math: UNIVERSAL MODE</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Courier New', monospace; }
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Courier New', monospace; touch-action: none; }
         
-        #container { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+        /* 容器与背景 */
+        #container { position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #000; }
         
-        /* 1. 隐藏的摄像头源 */
+        /* 1. 视频层 (隐藏) */
         #video-feed { display: none; }
         
-        /* 2. 骨骼可视化层 (UI层) */
+        /* 2. 骨骼层 */
         #skeleton-canvas { 
             position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
-            z-index: 5; pointer-events: none; transform: scaleX(-1); mix-blend-mode: screen;
+            object-fit: cover; z-index: 10; pointer-events: none; transform: scaleX(-1);
+            opacity: 0.4; 
         }
 
-        /* 3. Three.js 渲染层 (液态主视觉) */
-        #three-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        /* 3. 3D 粒子层 (背景改为极深蓝紫，增强对比度) */
+        #three-canvas { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            z-index: 5; 
+            background: radial-gradient(circle at center, #1a0b2e 0%, #000000 90%);
+        }
 
-        /* UI HUD */
+        /* UI */
         #ui-layer { 
-            position: absolute; top: 20px; left: 20px; color: white; z-index: 10; pointer-events: none;
-            text-shadow: 0 0 5px rgba(255, 0, 85, 0.8);
+            position: absolute; top: 20px; left: 20px; color: #fff; z-index: 20; pointer-events: none; 
+            text-shadow: 0 0 5px #00ffff;
         }
-        .title { 
-            font-size: 24px; font-weight: 900; letter-spacing: 2px;
-            background: linear-gradient(90deg, #ff0055, #00ffff);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-            margin-bottom: 5px;
-        }
-        .hud-text { font-size: 12px; color: #aaa; line-height: 1.5; }
+        .title { font-size: 18px; font-weight: bold; color: #00ffff; margin-bottom: 5px; border-left: 3px solid #fff; padding-left: 8px;}
+        .hud-text { font-size: 12px; opacity: 0.8; line-height: 1.5; }
 
         #loading { 
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
-            color: #fff; font-size: 14px; z-index: 20; letter-spacing: 2px;
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #00ffff; z-index: 50; font-size: 14px; 
+            background: rgba(0,0,0,0.8); padding: 15px; border: 1px solid #00ffff;
         }
 
-        /* 强制不可折叠 GUI */
-        #gui-container { position: absolute; top: 20px; right: 20px; z-index: 100; }
-        .lil-gui .title { pointer-events: none; cursor: default; background: #111; border-left: 2px solid #ff0055;}
-        .lil-gui .close-button { display: none; }
-        .lil-gui { --width: 280px; --background-color: rgba(0, 0, 0, 0.85); --text-color: #eee; --widget-color: #333; --focus-color: #ff0055; --number-color: #00ffff; }
+        #gui-container { position: absolute; top: 10px; right: 10px; z-index: 100; }
+        .lil-gui { --background-color: rgba(10,10,10,0.8); --text-color: #0ff; }
     </style>
-
+    
     <script type="importmap">
         {
             "imports": {
@@ -68,179 +67,75 @@
         <div id="three-canvas"></div>
     </div>
 
+    <div id="loading">STARTING UNIVERSAL ENGINE...</div>
+
     <div id="ui-layer">
-        <div class="title">LIQUID_GLITCH // V.01</div>
+        <div class="title">COSMIC MATH [COMPATIBLE]</div>
         <div class="hud-text">
-            > SYSTEM: ONLINE<br>
-            > SHADER: RGB_SHIFT_DISTORTION<br>
-            > HAND_TRACKING: <span id="status" style="color:#ff0055">SEARCHING...</span>
+            PARTICLES: 30,000<br>
+            STATUS: <span id="status" style="color:red">WAITING...</span><br>
+            SHAPE: <span id="model-name">QUANTUM_TREE</span>
         </div>
     </div>
-
-    <div id="loading">INITIALIZING NEURAL INTERFACE...</div>
+    
     <div id="gui-container"></div>
 
     <script type="module">
         import * as THREE from 'three';
 
-        // --- Config ---
         const CONFIG = {
-            distortionStrength: 0.5,  // 扭曲力度
-            radius: 0.4,              // 影响范围
-            rgbShiftIntensity: 1.5,   // 色散强度
-            viscosity: 0.1,           // 液体粘度（平滑度）
-            zoom: 1.0,
-            debugSkeleton: true
+            count: 30000,
+            size: 0.15,        // 标准世界单位尺寸
+            morphSpeed: 0.05,
+            autoSpin: true,
+            repulseRange: 2.5
         };
 
-        let scene, camera, renderer, material, plane;
+        let scene, camera, renderer, particles, geometry, material;
+        let positions, targetPositions, colors;
         let skeletonCtx, skeletonCanvas;
-        
-        // Interaction State
-        // Normalized coordinates (0 to 1)
-        let targetMouse = new THREE.Vector2(0.5, 0.5); 
-        let currentMouse = new THREE.Vector2(0.5, 0.5);
-        let velocity = new THREE.Vector2(0, 0);
-        let isPinching = false;
         let time = 0;
+        let currentShapeIndex = 0;
+        
+        let handPosition = new THREE.Vector3(999, 999, 999);
+        let isPinching = false, isFist = false, prevFist = false;
+        let isExploding = false; 
 
-        // Image URL (High quality Cyberpunk/Abstract image)
-        const IMG_URL = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop';
+        // 形状生成器
+        const SHAPES = [
+            { name: "QUANTUM_TREE", func: getTreePoint },
+            { name: "FRACTAL_KOCH", func: getFractalPoint },
+            { name: "CARDIOID_HEART", func: getCardioidPoint },
+            { name: "BUTTERFLY_CHAOS", func: getButterflyPoint },
+            { name: "ARCHIMEDES_SPIRAL", func: getSpiralPoint },
+            { name: "BERNOULLI_LOOP", func: getBernoulliPoint },
+            { name: "ROSE_GALAXY", func: getRosePoint }
+        ];
 
         async function init() {
-            // 1. Three.js Setup
             const container = document.getElementById('three-canvas');
             scene = new THREE.Scene();
             
-            // 使用正交相机 (Orthographic) 保证 2D 图片无透视变形，充满屏幕
-            const frustumSize = 1;
-            const aspect = window.innerWidth / window.innerHeight;
-            camera = new THREE.OrthographicCamera(frustumSize * aspect / -2, frustumSize * aspect / 2, frustumSize / 2, frustumSize / -2, 0.1, 1000);
-            camera.position.z = 1;
+            // 相机设置：确保 Z 轴距离足够
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 0, 6); 
 
-            renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
+            renderer = new THREE.WebGLRenderer({ alpha: true, antialias: false });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             container.appendChild(renderer.domElement);
 
-            // 2. Texture & Shader
-            const textureLoader = new THREE.TextureLoader();
-            const texture = await textureLoader.loadAsync(IMG_URL);
-            
-            // Adjust plane size to cover screen while maintaining aspect ratio logic inside shader
-            const geometry = new THREE.PlaneGeometry(2 * aspect, 2); 
-
-            material = new THREE.ShaderMaterial({
-                uniforms: {
-                    uTime: { value: 0 },
-                    uTexture: { value: texture },
-                    uMouse: { value: new THREE.Vector2(0.5, 0.5) }, // Hand position
-                    uVelo: { value: new THREE.Vector2(0, 0) },      // Hand Velocity for RGB shift
-                    uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-                    uImageRes: { value: new THREE.Vector2(texture.image.width, texture.image.height) },
-                    uStrength: { value: CONFIG.distortionStrength },
-                    uRadius: { value: CONFIG.radius },
-                    uAberration: { value: CONFIG.rgbShiftIntensity }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform float uTime;
-                    uniform sampler2D uTexture;
-                    uniform vec2 uMouse;
-                    uniform vec2 uVelo;
-                    uniform vec2 uResolution;
-                    uniform vec2 uImageRes;
-                    uniform float uStrength;
-                    uniform float uRadius;
-                    uniform float uAberration;
-
-                    varying vec2 vUv;
-
-                    // Cover fit logic
-                    vec2 getCoverUv(vec2 uv) {
-                        vec2 s = uResolution; // Screen
-                        vec2 i = uImageRes;   // Image
-                        float rs = s.x / s.y;
-                        float ri = i.x / i.y;
-                        vec2 new = rs < ri ? vec2(i.x * s.y / i.y, s.y) : vec2(s.x, i.y * s.x / i.x);
-                        vec2 offset = (rs < ri ? vec2((new.x - s.x) / 2.0, 0.0) : vec2(0.0, (new.y - s.y) / 2.0)) / new;
-                        vec2 uvCover = uv * s / new + offset;
-                        return uvCover;
-                    }
-
-                    void main() {
-                        vec2 uv = getCoverUv(vUv);
-                        
-                        // 1. Calculate Distance field from Hand
-                        // Aspect ratio correction for circular interaction
-                        vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);
-                        vec2 mouseCorrected = uMouse * aspect;
-                        vec2 uvCorrected = vUv * aspect;
-                        
-                        float dist = distance(uvCorrected, mouseCorrected);
-                        
-                        // 2. Liquid Distortion Force (Bulge/Pinch)
-                        // Smoothstep makes a soft circle
-                        float decay = smoothstep(uRadius, 0.0, dist);
-                        
-                        // Distortion direction maps to velocity direction + radial direction
-                        vec2 dir = normalize(uvCorrected - mouseCorrected);
-                        
-                        // Combined distortion: Drag (Velocity) + Bulge (Radial)
-                        vec2 distortion = (dir * 0.2 + uVelo * 2.0) * decay * uStrength;
-
-                        // 3. RGB Shift (Chromatic Aberration) based on Velocity
-                        // The faster the hand, the larger the separation
-                        float shiftStrength = length(uVelo) * uAberration * 5.0 + decay * 0.02;
-                        vec2 rgbOffset = normalize(uVelo) * shiftStrength;
-                        
-                        // Sample channels separately
-                        float r = texture2D(uTexture, uv - distortion - rgbOffset).r;
-                        float g = texture2D(uTexture, uv - distortion).g;
-                        float b = texture2D(uTexture, uv - distortion + rgbOffset).b;
-
-                        // Vignette & Noise
-                        float noise = (fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.05;
-                        
-                        gl_FragColor = vec4(r, g, b, 1.0) + noise;
-                    }
-                `
-            });
-
-            plane = new THREE.Mesh(geometry, material);
-            scene.add(plane);
-
-            // 3. Canvas & MediaPipe
             skeletonCanvas = document.getElementById('skeleton-canvas');
             skeletonCtx = skeletonCanvas.getContext('2d');
             resizeCanvas();
 
+            initParticles();
             setupGUI();
-            initMediaPipe();
 
-            document.getElementById('loading').style.display = 'none';
-            window.addEventListener('resize', onWindowResize);
-            animate();
-        }
-
-        // --- MediaPipe Logic ---
-        function initMediaPipe() {
             const videoElement = document.getElementById('video-feed');
             const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
             
-            hands.setOptions({
-                maxNumHands: 1,
-                modelComplexity: 1,
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
             hands.onResults(onHandsResults);
 
             const cameraUtils = new Camera(videoElement, {
@@ -248,89 +143,183 @@
                 width: 640, height: 480 
             });
             cameraUtils.start();
+
+            document.getElementById('loading').style.display = 'none';
+            window.addEventListener('resize', onWindowResize);
+            animate();
         }
 
-        function onHandsResults(results) {
-            // Draw Skeleton
-            skeletonCtx.clearRect(0, 0, skeletonCanvas.width, skeletonCanvas.height);
+        // --- 核心修复：生成发光纹理 ---
+        function generateSprite() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0,0,32,32);
+            const texture = new THREE.CanvasTexture(canvas);
+            return texture;
+        }
+
+        function initParticles() {
+            geometry = new THREE.BufferGeometry();
+            positions = new Float32Array(CONFIG.count * 3);
+            targetPositions = new Float32Array(CONFIG.count * 3);
+            colors = new Float32Array(CONFIG.count * 3);
+
+            const palette = [
+                new THREE.Color(0x00ffff), new THREE.Color(0xff00ff), 
+                new THREE.Color(0xffd700), new THREE.Color(0xffffff)
+            ];
+
+            for(let i=0; i<CONFIG.count; i++) {
+                positions[i*3] = (Math.random()-0.5)*5;
+                positions[i*3+1] = (Math.random()-0.5)*5;
+                positions[i*3+2] = (Math.random()-0.5)*5;
+
+                const c = palette[Math.floor(Math.random() * palette.length)];
+                colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            // --- 核心修复：使用标准 PointsMaterial ---
+            // 这种材质不依赖 GPU Shader 编译，兼容性最好
+            material = new THREE.PointsMaterial({
+                size: CONFIG.size,
+                map: generateSprite(), // 使用生成的发光贴图
+                vertexColors: true,    // 启用顶点颜色
+                blending: THREE.AdditiveBlending, // 叠加发光模式
+                depthWrite: false,     // 不遮挡背景
+                transparent: true,
+                sizeAttenuation: true  // 远小近大
+            });
+
+            particles = new THREE.Points(geometry, material);
             
+            // --- 核心修复：关闭视锥剔除 ---
+            // 这确保了无论粒子怎么移动，都不会被系统误认为“在屏幕外”而隐藏
+            particles.frustumCulled = false; 
+
+            scene.add(particles);
+            calculateTargetShape(0);
+        }
+
+        // --- MATH FUNCTIONS (不变) ---
+        function calculateTargetShape(index) {
+            const func = SHAPES[index].func;
+            const count = CONFIG.count;
+            for(let i=0; i<count; i++) {
+                const p = i / count;
+                const res = func(p, i);
+                targetPositions[i*3] = res.x;
+                targetPositions[i*3+1] = res.y;
+                targetPositions[i*3+2] = res.z;
+            }
+            document.getElementById('model-name').innerText = SHAPES[index].name;
+        }
+
+        function getTreePoint(p, i) {
+            const h = p * 4 - 2; 
+            const r = (2 - h) * 0.5 * Math.random();
+            const theta = i * 0.1;
+            return { x: Math.cos(theta)*r, y: h, z: Math.sin(theta)*r };
+        }
+        function getFractalPoint(p, i) {
+            return { x: (Math.random()-0.5)*3, y: (Math.random()-0.5)*3, z: (Math.random()-0.5)*3 };
+        }
+        function getCardioidPoint(p, i) {
+            const t = p * Math.PI * 2;
+            const scale = 0.1;
+            const x = 16 * Math.pow(Math.sin(t), 3);
+            const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+            return { x: x*scale, y: y*scale, z: (Math.random()-0.5) };
+        }
+        function getButterflyPoint(p, i) {
+            const t = p * 12 * Math.PI;
+            const r = Math.exp(Math.cos(t)) - 2*Math.cos(4*t) + Math.pow(Math.sin(t/12),5);
+            return { x: Math.sin(t)*r*0.5, y: Math.cos(t)*r*0.5, z: (Math.random()-0.5)*0.5 };
+        }
+        function getSpiralPoint(p, i) {
+            const t = p * 20 * Math.PI;
+            return { x: Math.cos(t)*p*3, y: Math.sin(t)*p*3, z: (p-0.5)*5 };
+        }
+        function getBernoulliPoint(p, i) {
+            const t = p * 2 * Math.PI;
+            const den = 1 + Math.pow(Math.sin(t), 2);
+            return { x: 2*Math.cos(t)/den, y: 2*Math.cos(t)*Math.sin(t)/den, z: (Math.random()-0.5)*0.5 };
+        }
+        function getRosePoint(p, i) {
+            const k = 4; const t = p*2*Math.PI; const r = Math.cos(k*t)*2.5;
+            return { x: r*Math.cos(t), y: r*Math.sin(t), z: (Math.random()-0.5)*0.5 };
+        }
+
+        // --- Interaction ---
+        function onHandsResults(results) {
+            skeletonCtx.clearRect(0, 0, skeletonCanvas.width, skeletonCanvas.height);
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const lm = results.multiHandLandmarks[0];
-                
-                // Visualization
-                if (CONFIG.debugSkeleton) {
-                    drawConnectors(skeletonCtx, lm, HAND_CONNECTIONS, {color: 'rgba(0, 255, 255, 0.5)', lineWidth: 2});
-                    drawLandmarks(skeletonCtx, lm, {color: '#ff0055', lineWidth: 1, radius: 2});
-                }
-                
-                // Logic: Index Finger Tip (8)
-                const indexTip = lm[8];
-                
-                // Update Target Mouse (Flip X)
-                targetMouse.set(1.0 - indexTip.x, indexTip.y);
-                
-                // Detect Pinch (Thumb 4 & Index 8)
-                const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
-                isPinching = pinchDist < 0.05;
+                drawConnectors(skeletonCtx, lm, HAND_CONNECTIONS, {color: '#00ffff', lineWidth: 2});
+                drawLandmarks(skeletonCtx, lm, {color: '#ffffff', lineWidth: 1, radius: 2});
 
-                document.getElementById('status').innerText = isPinching ? "LOCKED (PINCH)" : "TRACKING";
+                const x = (1 - lm[8].x) * 2 - 1;
+                const y = -(lm[8].y * 2 - 1);
+                const vec = new THREE.Vector3(x, y, 0.5).unproject(camera);
+                const dir = vec.sub(camera.position).normalize();
+                const dist = -camera.position.z / dir.z;
+                const pos = camera.position.clone().add(dir.multiplyScalar(dist));
+                
+                handPosition.lerp(pos, 0.2);
+                document.getElementById('status').innerText = "LINKED";
                 document.getElementById('status').style.color = "#00ffff";
+                detectGestures(lm);
             } else {
-                document.getElementById('status').innerText = "SEARCHING...";
-                document.getElementById('status').style.color = "#ff0055";
-                // Reset velocity when hand lost, but keep position
-                targetMouse.set(0.5, 0.5);
+                handPosition.set(999,999,999);
+                document.getElementById('status').innerText = "SEARCHING";
+                document.getElementById('status').style.color = "red";
             }
         }
 
-        // --- Core Animation Loop ---
-        function animate() {
-            requestAnimationFrame(animate);
-            time += 0.01;
+        function detectGestures(lm) {
+            const tips = [8,12,16,20];
+            let folded = 0;
+            tips.forEach(t => { if(lm[t].y > lm[t-2].y) folded++; });
+            isFist = folded >= 3;
 
-            if (material) {
-                // Physics: Smooth Mouse Movement (Viscosity)
-                // lerp creates the "liquid" delay feel
-                let prevMouse = currentMouse.clone();
-                currentMouse.lerp(targetMouse, CONFIG.viscosity);
-                
-                // Calculate Velocity
-                let vel = new THREE.Vector2().subVectors(currentMouse, prevMouse);
-                // Smooth velocity decay
-                velocity.lerp(vel, 0.1); 
+            if (isFist && !prevFist) triggerExplosion();
+            prevFist = isFist;
 
-                // Dynamic Strength based on Pinch
-                let targetStrength = isPinching ? CONFIG.distortionStrength * 2.0 : CONFIG.distortionStrength;
-                material.uniforms.uStrength.value = THREE.MathUtils.lerp(material.uniforms.uStrength.value, targetStrength, 0.1);
+            const pinch = Math.hypot(lm[8].x-lm[4].x, lm[8].y-lm[4].y);
+            isPinching = pinch < 0.05;
 
-                // Update Uniforms
-                material.uniforms.uTime.value = time;
-                material.uniforms.uMouse.value = currentMouse;
-                material.uniforms.uVelo.value = velocity;
-                material.uniforms.uAberration.value = CONFIG.rgbShiftIntensity;
-                material.uniforms.uRadius.value = CONFIG.radius;
+            if (isPinching) {
+                const rot = (lm[8].x - 0.5) * 0.2;
+                particles.rotation.y += rot;
+            } else if (CONFIG.autoSpin) {
+                particles.rotation.y += 0.002;
             }
+        }
 
-            renderer.render(scene, camera);
+        function triggerExplosion() {
+            if(isExploding) return;
+            isExploding = true;
+            setTimeout(() => {
+                currentShapeIndex = (currentShapeIndex + 1) % SHAPES.length;
+                calculateTargetShape(currentShapeIndex);
+                isExploding = false;
+            }, 300);
         }
 
         // --- GUI ---
         function setupGUI() {
-            const gui = new lil.GUI({ container: document.getElementById('gui-container'), title: 'FLUID_ENGINE' });
-            
-            const effect = gui.addFolder('DISTORTION MATRIX');
-            effect.add(CONFIG, 'distortionStrength', -1.0, 1.0).name('Liquid Force');
-            effect.add(CONFIG, 'radius', 0.1, 1.0).name('Influence Radius');
-            effect.add(CONFIG, 'viscosity', 0.01, 0.5).name('Flow Viscosity');
-            effect.open();
-
-            const glitch = gui.addFolder('OPTICS / GLITCH');
-            glitch.add(CONFIG, 'rgbShiftIntensity', 0.0, 5.0).name('RGB Aberration');
-            glitch.open();
-
-            const sys = gui.addFolder('SYSTEM');
-            sys.add(CONFIG, 'debugSkeleton').name('Show Skeleton');
-            sys.open();
+            const gui = new lil.GUI({ container: document.getElementById('gui-container'), title: 'SETTINGS' });
+            gui.close();
+            gui.add(CONFIG, 'size', 0.05, 0.5).name('Size').onChange(v => material.size = v);
+            gui.add({ next: triggerExplosion }, 'next').name('>> Next Shape');
         }
 
         function resizeCanvas() {
@@ -339,24 +328,56 @@
         }
 
         function onWindowResize() {
-            const aspect = window.innerWidth / window.innerHeight;
-            // Update camera frustum to match aspect
-            const frustumSize = 1;
-            camera.left = -frustumSize * aspect / 2;
-            camera.right = frustumSize * aspect / 2;
-            camera.top = frustumSize / 2;
-            camera.bottom = -frustumSize / 2;
+            camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
-
             renderer.setSize(window.innerWidth, window.innerHeight);
-            if(material) material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
-            
-            // Update plane geometry to fill screen
-            if (plane) {
-                plane.geometry.dispose();
-                plane.geometry = new THREE.PlaneGeometry(2 * aspect, 2);
-            }
             resizeCanvas();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.01;
+            
+            if (particles) {
+                const pos = geometry.attributes.position.array;
+                let updated = false;
+
+                // CPU Morphing Logic
+                for(let i=0; i<CONFIG.count * 3; i+=3) { // i, i+1, i+2
+                    // 1. Interaction (Repulsion)
+                    let px = pos[i], py = pos[i+1], pz = pos[i+2];
+                    
+                    // Move towards target
+                    if (!isExploding) {
+                        px += (targetPositions[i] - px) * CONFIG.morphSpeed;
+                        py += (targetPositions[i+1] - py) * CONFIG.morphSpeed;
+                        pz += (targetPositions[i+2] - pz) * CONFIG.morphSpeed;
+                    } else {
+                        // Explosion Noise
+                        px += (Math.random()-0.5) * 0.2;
+                        py += (Math.random()-0.5) * 0.2;
+                        pz += (Math.random()-0.5) * 0.2;
+                    }
+
+                    // Hand Repulsion
+                    const dx = px - handPosition.x;
+                    const dy = py - handPosition.y;
+                    const dz = pz - handPosition.z;
+                    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                    
+                    if (dist < CONFIG.repulseRange) {
+                        const force = (1.0 - dist/CONFIG.repulseRange) * 0.2;
+                        px += (dx/dist) * force;
+                        py += (dy/dist) * force;
+                        pz += (dz/dist) * force;
+                    }
+
+                    pos[i] = px; pos[i+1] = py; pos[i+2] = pz;
+                }
+                
+                geometry.attributes.position.needsUpdate = true;
+            }
+            renderer.render(scene, camera);
         }
 
         init();
